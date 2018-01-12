@@ -69,9 +69,13 @@ def parseconfig(cfg):
         'follow-names':    raw_config.get('follow-names', False),
         'relative-root':   raw_config.get('relative-root', '/'),
         'http-auth':       raw_config.get('http-auth', False),
+        'http-headers':    raw_config.get('http-headers', {}),
         'users':           raw_config.get('users', {}),
         'wrap-lines':      raw_config.get('wrap-lines', True),
-        'tail-lines':      raw_config.get('tail-lines', 10)
+        'tail-lines':      raw_config.get('tail-lines', 10),
+        'grep-lines':      raw_config.get('grep-lines', 3000),
+        'live-view':       raw_config.get('live-view', False),
+        'download-url':    raw_config.get('download-url', None),
     }
 
     if 'files' not in raw_config or not len(raw_config['files']):
@@ -115,7 +119,13 @@ def parseopts(args=None):
       relative-root: /tailon  # web app root path (default: '')
       commands: [tail, grep]  # allowed commands
       tail-lines: 10          # number of lines to tail initially
+      grep-lines: 3000        # number max of lines to grep
       wrap-lines: true        # initial line-wrapping state
+      live-view: False        # view files live (tail) or just search in files
+
+      http-headers:           # custom http headers
+        Access-Control-Allow-Origin: "*"
+
 
       files:
         - '/var/log/messages'
@@ -158,6 +168,8 @@ def parseopts(args=None):
     arg('-h', '--help', action='help', help='show this help message and exit')
     arg('-d', '--debug', action='store_true', help='show debug messages')
     arg('-v', '--version', action='version', version='tailon version %s' % __version__)
+    arg('-L', '--live-view', action='store_true', help='Do we monitor files or directories')
+    arg('--download-url', dest='download-url', default=None, help='url to download files')
 
     arg('--output-encoding', dest='output_encoding', metavar='enc',
         help="encoding for output")
@@ -179,6 +191,8 @@ def parseopts(args=None):
 
     arg('-t', '--tail-lines', default=10, type=int, metavar='num',
         help='number of lines to tail initially')
+    arg('-g', '--grep-lines', default=3000, type=int, metavar='num',
+        help='number max of lines to grep')
 
     arg('-m', '--commands', nargs='*', metavar='cmd',
         choices=commands.ToolPaths.command_names, default=['tail', 'grep', 'awk'],
@@ -206,12 +220,16 @@ def setup(opts):
         'commands': opts.commands,
         'allow-transfers': opts.allow_transfers,
         'http-auth': opts.__dict__.get('http_auth', False),
+        'http-headers': opts.__dict__.get('http_auth', {}),
         'users': dict((i.split(':') for i in opts.users)),
         'follow-names': opts.follow_names,
         'relative-root': opts.__dict__.get('relative_root', ''),
         'debug': opts.__dict__.get('debug', False),
         'tail-lines': opts.__dict__.get('tail_lines', 10),
+        'grep-lines': opts.__dict__.get('grep_lines', 3000),
         'wrap-lines': opts.__dict__.get('wrap-lines', True),
+        'live-view': opts.__dict__.get('live-view', False),
+        'download-url': opts.__dict__.get('download-url', False),
     }
 
     if config['follow-names']:
@@ -288,6 +306,8 @@ def main(argv=sys.argv):
         # refresh the filelist every time the file select element is focused.
         'refresh_filelist': bool(file_lister.all_dir_names),
         'commands': config['commands'],
+        'live-view-initial': config['live-view'],
+        'download-url': config['download-url'],
     }
 
     template_dir, assets_dir = get_resource_dirs()
@@ -299,5 +319,6 @@ def main(argv=sys.argv):
         config, client_config, template_dir, assets_dir,
         file_lister=file_lister,
         cmd_control=cmd_control,
+        toolpaths = toolpaths,
     )
     start_server(application, config, client_config)

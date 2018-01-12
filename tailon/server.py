@@ -10,6 +10,7 @@ from tornado import web, ioloop, process, escape
 from tornado_http_auth import BasicAuthMixin, DigestAuthMixin
 
 from . import utils
+from glob import glob
 
 
 STREAM = process.Subprocess.STREAM
@@ -48,10 +49,29 @@ class Files(BaseHandler):
         self.set_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
         self.set_header('Content-Type', 'application/json')
 
+        for header in self.config["http-headers"]:
+            self.set_header(header, self.config["http-headers"][header])
+
         if check:
             message = self.application.file_lister.has_changed
         else:
             message = self.application.file_lister.files
+        self.write(escape.json_encode(message))
+
+
+class Dirs(BaseHandler):
+    def get(self, check=None):
+        self.application.file_lister.refresh()
+        self.set_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+        self.set_header('Content-Type', 'application/json')
+
+        for header in self.config["http-headers"]:
+            self.set_header(header, self.config["http-headers"][header])
+
+        if check:
+            message = self.application.file_lister.has_changed
+        else:
+            message = self.application.file_lister.dirs
         self.write(escape.json_encode(message))
 
 
@@ -93,7 +113,9 @@ class WebsocketTailon(sockjs.tornado.SockJSConnection):
         self.config = self.application.config
         self.file_lister = self.application.file_lister
         self.cmd_control = self.application.cmd_control
+        self.toolpaths = self.application.toolpaths
         self.initial_tail_lines = self.config['tail-lines']
+        self.initial_grep_lines = self.config['grep-lines']
 
         self.last_stdout_line = []
         self.last_stderr_line = []
@@ -102,7 +124,8 @@ class WebsocketTailon(sockjs.tornado.SockJSConnection):
             'tail': None,
             'grep': None,
             'awk': None,
-            'sed': None
+            'sed': None,
+            'zcat': None
         }
 
     def on_open(self, info):
@@ -117,10 +140,13 @@ class WebsocketTailon(sockjs.tornado.SockJSConnection):
         lines = data.splitlines(True)
 
         if not lines:
-            return
+            msg = "eof"
+            self.write_json(msg)
+        else:
+            lines = utils.line_buffer(lines, self.last_stdout_line)
+            self.write_json(lines)
 
-        lines = utils.line_buffer(lines, self.last_stdout_line)
-        self.write_json(lines)
+
 
     def stderr_callback(self, path, stream, data):
         # log.debug('stderr: %s', data)
@@ -162,25 +188,30 @@ class WebsocketTailon(sockjs.tornado.SockJSConnection):
         command = escape.json_decode(message)
         allowed_commands = self.config['commands']
         log.debug('received message: %r', command)
+        log.debug(command.keys())
 
-        if not set(command.keys()) <= {'command', 'path', 'tail-lines', 'script'}:
-            log.warn('invalid message received: %r', command)
+        if not set(command.keys()) <= {'command', 'live-view', 'path', 'tail-lines', 'grep-lines', 'script'}:
             return
 
         if command['command'] not in allowed_commands:
             log.warn('disallowed or unsupported command: %r', command['command'])
             return
 
-        path = os.path.abspath(command['path'])
-        if not self.file_lister.is_path_allowed(path):
-            log.warn('request to unlisted file: %r', path)
-            return
+        path = [os.path.abspath(command['path'])]
+        live_path = []
+
+        for item in path:
+            if not self.file_lister.is_path_allowed(item):
+                log.warn('request to unlisted file: %r', item)
+                return
+            else:
+                live_path.extend(glob('%s/*.log' %(item)))
 
         self.killall()
 
-        if 'tail' == command['command']:
+        if 'tail' == command['command'] and command['live-view']:
             n = command.get('tail-lines', self.initial_tail_lines)
-            proc = self.cmd_control.tail(n, path, STREAM, STREAM)
+            proc = self.cmd_control.tail(n, live_path, STREAM, STREAM)
             self.processes['tail'] = proc
 
             outcb = partial(self.stdout_callback, path, proc.stdout)
@@ -190,10 +221,17 @@ class WebsocketTailon(sockjs.tornado.SockJSConnection):
 
         elif 'grep' == command['command']:
             n = command.get('tail-lines', self.initial_tail_lines)
+            grep_lines = command.get('grep-lines', self.initial_grep_lines)
             regex = command.get('script', '.*')
+            log.debug('n = %s, path = %s, regex = %s' %(n, path, regex))
 
-            proc_tail, proc_grep = self.cmd_control.tail_grep(n, path, regex, STREAM, STREAM)
-            self.processes['tail'], self.processes['grep'] = proc_tail, proc_grep
+            if not command['live-view'] and self.toolpaths.cmd_sift:
+                proc_pregrep, proc_grep = self.cmd_control.all_grep(grep_lines, path, regex, STREAM, STREAM)
+            elif not command['live-view'] and not self.toolpaths.cmd_sift:
+                proc_zcat, proc_pregrep, proc_grep = self.cmd_control.all_grep(grep_lines, path, regex, STREAM, STREAM)
+            elif command['live-view']:
+                proc_tail, proc_grep = self.cmd_control.tail_grep(n, live_path, regex, STREAM, STREAM)
+            self.processes['grep'] = proc_grep
 
             outcb = partial(self.stdout_callback, path, proc_grep.stdout)
             errcb = partial(self.stderr_callback, path, proc_grep.stderr)
@@ -204,7 +242,10 @@ class WebsocketTailon(sockjs.tornado.SockJSConnection):
             n = command.get('tail-lines', self.initial_tail_lines)
             script = command.get('script', '{print $0}')
 
-            proc_tail, proc_awk = self.cmd_control.tail_awk(n, path, script, STREAM, STREAM)
+            if not command['live-view']:
+                proc_zcat, proc_awk = self.cmd_control.all_awk(path, script, STREAM, STREAM)
+            else:
+                proc_tail, proc_awk = self.cmd_control.tail_awk(n, live_path, script, STREAM, STREAM)
             self.processes['tail'], self.processes['awk'] = proc_tail, proc_awk
 
             outcb = partial(self.stdout_callback, path, proc_awk.stdout)
@@ -216,7 +257,10 @@ class WebsocketTailon(sockjs.tornado.SockJSConnection):
             n = command.get('tail-lines', self.initial_tail_lines)
             script = command.get('script', 's|.*|&|')
 
-            proc_tail, proc_sed = self.cmd_control.tail_sed(n, path, script, STREAM, STREAM)
+            if not command['live-view']:
+                proc_zcat, proc_sed = self.cmd-control.all_sed(path, script, STREAM, STREAM)
+            else:
+                proc_tail, proc_sed = self.cmd_control.tail_sed(n, live_path, script, STREAM, STREAM)
             self.processes['tail'], self.processes['sed'] = proc_tail, proc_sed
 
             outcb = partial(self.stdout_callback, path, proc_sed.stdout)
@@ -273,6 +317,8 @@ class TailonApplication(BaseApplication):
     def __init__(self, *args, **kw):
         self.file_lister = kw.pop('file_lister')
         self.cmd_control = kw.pop('cmd_control')
+        self.toolpaths = kw.pop('toolpaths')
+        log.debug('============== %s' %self.toolpaths)
         super(TailonApplication, self).__init__(*args, **kw)
 
     def enable_authentication(self, auth_type):
@@ -287,6 +333,7 @@ class TailonApplication(BaseApplication):
         routes = [
             [r'/assets/(.*)', NonCachingStaticFileHandler, {'path': os.path.join(self.here, 'assets/')}],
             [r'/files(/check)?', Files],
+            [r'/dirs(/check)?', Dirs],
             [r'/fetch/(.*)', Fetch, {'path': '/'}],
             [r'/', Index, {'template': 'tailon.html'}],
         ]
