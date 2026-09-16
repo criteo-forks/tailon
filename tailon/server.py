@@ -6,7 +6,7 @@ from functools import partial
 from datetime import datetime
 
 import sockjs.tornado
-from tornado import web, ioloop, process, escape
+from tornado import web, ioloop, iostream, process, escape
 from tornado_http_auth import BasicAuthMixin, DigestAuthMixin
 
 from . import utils
@@ -16,7 +16,29 @@ import re
 
 STREAM = process.Subprocess.STREAM
 log = logging.getLogger('tailon')
-io_loop = ioloop.IOLoop.instance()
+
+
+async def _pump_stream(stream, callback):
+    """Feed a callback with chunks read from a stream until it is closed.
+
+    Tornado 6 removed the (callback, streaming_callback) arguments of
+    IOStream.read_until_close(), so stream consumption has to be driven
+    by an explicit coroutine.
+    """
+    while True:
+        try:
+            data = await stream.read_bytes(65536, partial=True)
+        except iostream.StreamClosedError:
+            break
+        try:
+            callback(data)
+        except Exception:
+            log.exception('stream callback failed')
+            break
+
+
+def read_until_close(stream, callback):
+    ioloop.IOLoop.current().spawn_callback(_pump_stream, stream, callback)
 
 
 #-----------------------------------------------------------------------------
@@ -261,8 +283,8 @@ class WebsocketTailon(sockjs.tornado.SockJSConnection):
 
             outcb = partial(self.stdout_callback, path, proc.stdout)
             errcb = partial(self.stderr_callback, path, proc.stderr)
-            proc.stdout.read_until_close(outcb, outcb)
-            proc.stderr.read_until_close(errcb, errcb)
+            read_until_close(proc.stdout, outcb)
+            read_until_close(proc.stderr, errcb)
 
         elif 'grep' == command['command']:
             n = command.get('tail-lines', self.initial_tail_lines)
@@ -288,8 +310,8 @@ class WebsocketTailon(sockjs.tornado.SockJSConnection):
 
             outcb = partial(self.stdout_callback, path, proc_awk.stdout)
             errcb = partial(self.stderr_callback, path, proc_awk.stderr)
-            proc_awk.stdout.read_until_close(outcb, outcb)
-            proc_awk.stderr.read_until_close(errcb, errcb)
+            read_until_close(proc_awk.stdout, outcb)
+            read_until_close(proc_awk.stderr, errcb)
 
         elif 'sed' == command['command']:
             n = command.get('tail-lines', self.initial_tail_lines)
@@ -303,8 +325,8 @@ class WebsocketTailon(sockjs.tornado.SockJSConnection):
 
             outcb = partial(self.stdout_callback, path, proc_sed.stdout)
             errcb = partial(self.stderr_callback, path, proc_sed.stderr)
-            proc_sed.stdout.read_until_close(outcb, outcb)
-            proc_sed.stderr.read_until_close(errcb, errcb)
+            read_until_close(proc_sed.stdout, outcb)
+            read_until_close(proc_sed.stderr, errcb)
 
     def run_live_view(self, n, live_path, regex):
         proc_tail, proc_grep = self.cmd_control.tail_grep(n, live_path, regex, STREAM, STREAM)
@@ -312,8 +334,8 @@ class WebsocketTailon(sockjs.tornado.SockJSConnection):
 
         outcb = partial(self.stdout_callback, live_path, proc_grep.stdout)
         errcb = partial(self.stderr_callback, live_path, proc_grep.stderr)
-        proc_grep.stdout.read_until_close(outcb, outcb)
-        proc_grep.stderr.read_until_close(errcb, errcb)
+        read_until_close(proc_grep.stdout, outcb)
+        read_until_close(proc_grep.stderr, errcb)
 
     def run_grep_all(self, grep_lines, path, regex, code=0):
         self.killall()
@@ -344,8 +366,8 @@ class WebsocketTailon(sockjs.tornado.SockJSConnection):
         outcb = partial(self.stdout_callback, path, proc_grep.stdout)
         errcb = partial(self.stderr_callback, path, proc_grep.stderr)
         end_of_file = partial(self.run_grep_all, grep_lines, path, regex)
-        proc_grep.stdout.read_until_close(outcb, outcb)
-        proc_grep.stderr.read_until_close(errcb, errcb)
+        read_until_close(proc_grep.stdout, outcb)
+        read_until_close(proc_grep.stderr, errcb)
         proc_grep.set_exit_callback(end_of_file)
 
     def on_close(self):

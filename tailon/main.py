@@ -10,7 +10,6 @@ import pprint
 import logging
 import textwrap
 import collections
-import pkg_resources
 
 from tornado import ioloop, httpserver
 
@@ -57,7 +56,8 @@ def enable_debugging():
 def parseconfig(cfg):
     import yaml
 
-    raw_config = yaml.load(cfg)
+    # PyYAML >= 6 requires an explicit loader; safe_load works on all versions.
+    raw_config = yaml.safe_load(cfg)
 
     port, addr = utils.parseaddr(raw_config.get('bind', 'localhost:8080'))
     config = {
@@ -265,11 +265,13 @@ def start_server(application, config, client_config):
 
 
 def get_resource_dirs():
-    try:
-        template_dir = pkg_resources.resource_filename('tailon', 'templates')
-        assets_dir = pkg_resources.resource_filename('tailon', 'assets')
-    except ImportError:
-        template_dir, assets_dir = None, None
+    # The package is always installed unzipped (zip_safe=False), so the
+    # resources can be resolved from the package directory directly. This
+    # avoids depending on pkg_resources, which is no longer available by
+    # default on Python >= 3.12.
+    here = os.path.dirname(os.path.abspath(__file__))
+    template_dir = os.path.join(here, 'templates')
+    assets_dir = os.path.join(here, 'assets')
     return template_dir, assets_dir
 
 

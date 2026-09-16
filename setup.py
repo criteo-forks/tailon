@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 requirements = [
-    'tornado>=4.0.0, <5.0.0',
+    'tornado>=6.0, <7.0',
     'tornado-http-auth>=1.0.0',
     'sockjs-tornado>=1.0.0',
     'PyYAML>=3.11',
@@ -29,7 +29,7 @@ requirements = [
 
 kw = {
     'name':             'tailon',
-    'version':          '1.3.0-criteo.10',
+    'version':          '1.3.0+criteo.11',
     'description':      'Webapp for looking at and searching through log files',
     'long_description': open('README.rst').read(),
     'author':           'Georgi Valkov',
